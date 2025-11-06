@@ -6,5 +6,5 @@ Specter Admin v22
 - Forced credential-change modal on Settings when needed.
 - Dashboard charts & stats.
 - API endpoints aligned to your provided outputs (authenticate, playlists create/delete, parent-control update). MAC handled plain text (base64 accepted input).
-- SQLite auto-migrations (idempotent). Default admin: admin / admin123 (force change).
+- SQLite auto-migrations (idempotent). Default admin (force change).
 - Backup/Restore removed entirely.
