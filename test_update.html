@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Teste de Atualização</title>
+    <meta charset="utf-8">
+</head>
+<body>
+    <h1>Teste de Atualização do App</h1>
+    <div id="result"></div>
+
+    <script>
+        // Simula diferentes versões do app
+        const versions = [1, 2, 3];
+        const resultDiv = document.getElementById('result');
+        
+        async function checkUpdate(version) {
+            try {
+                const response = await fetch(`http://localhost/nioplayer/api/v2/update.php?version=${version}`);
+                const data = await response.json();
+                resultDiv.innerHTML += `<p>Testando versão ${version}:<br>`;
+                resultDiv.innerHTML += `Status: ${data.status ? 'Atualização disponível' : 'Sem atualização'}<br>`;
+                resultDiv.innerHTML += `Versão mais recente: ${data.versionName}<br>`;
+                resultDiv.innerHTML += `URL: ${data.url}<br>`;
+                resultDiv.innerHTML += `Mensagem: ${data.changelog}</p>`;
+            } catch (error) {
+                resultDiv.innerHTML += `<p>Erro ao testar versão ${version}: ${error}</p>`;
+            }
+        }
+
+        // Testa todas as versões
+        versions.forEach(version => checkUpdate(version));
+    </script>
+</body>
+</html>
