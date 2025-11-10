@@ -1,261 +1,265 @@
 <?php
+/*
+ * NiO Player API (simplified)
+ * Path: api/nio/index.php
+ * PHP 7.4+
+ *
+ * Notes:
+ * - Uses panel DB wrapper (DB::one/all/exec) via api/_bootstrap.php
+ * - Drops module_utils.php, license_check.php, visitor_log.php, protocol_check.php
+ * - Keeps response shapes and XOR+base64 encryption used by the app
+ */
+
 declare(strict_types=1);
-require_once __DIR__ . '/includes/header.php';
 
-/* ---------------- helpers ---------------- */
-function safe_int($row, string $k): int { return (int)($row[$k] ?? 0); }
-function fmt_time(?string $s): string {
-  $s = trim((string)$s);
-  if ($s === '') return '—';
-  $t = strtotime($s);
-  return $t === false ? $s : date('d/m/Y H:i', $t);
-}
-function excerpt(string $txt, int $len = 160): string {
-  if (mb_strlen($txt) <= $len) return $txt;
-  return mb_substr($txt, 0, $len).'…';
-}
+// Panel/API bootstrap (DB::, helpers)
+require_once __DIR__ . '/_bootstrap.php';
 
-/* --------------- quick stats --------------- */
-$stats = [
-  'services'      => safe_int(DB::one('SELECT COUNT(*) c FROM nio_services') ?? [], 'c'),
-  'codes'         => safe_int(DB::one('SELECT COUNT(*) c FROM nio_active_codes') ?? [], 'c'),
-  'announcements' => safe_int(DB::one('SELECT COUNT(*) c FROM nio_announcements') ?? [], 'c'),
-  'notifications' => safe_int(DB::one('SELECT COUNT(*) c FROM nio_notifications') ?? [], 'c'),
-];
+/* ---------------- Encryption helpers (kept as-is) ---------------- */
 
-/* --------------- last N days aggregates --------------- */
-$days  = 14;
-$utc   = new DateTimeZone('UTC');
-$today = new DateTimeImmutable('now', $utc);
-$labels = [];
-for ($i = $days - 1; $i >= 0; $i--) $labels[] = $today->modify("-{$i} days")->format('Y-m-d');
-$since = $labels[0];
-
-$aggCodes = DB::all('SELECT substr(created_at,1,10) d, COUNT(*) c FROM nio_active_codes WHERE date(created_at) >= ? GROUP BY d ORDER BY d', [$since]);
-$aggServs = DB::all('SELECT substr(created_at,1,10) d, COUNT(*) c FROM nio_services      WHERE date(created_at) >= ? GROUP BY d ORDER BY d', [$since]);
-$aggAnns  = DB::all('SELECT substr(created_at,1,10) d, COUNT(*) c FROM nio_announcements WHERE date(created_at) >= ? GROUP BY d ORDER BY d', [$since]);
-$aggNotfs = DB::all('SELECT substr(created_at,1,10) d, COUNT(*) c FROM nio_notifications WHERE date(created_at) >= ? GROUP BY d ORDER BY d', [$since]);
-
-$mapC=[]; foreach($aggCodes as $r) $mapC[$r['d']] = (int)$r['c'];
-$mapS=[]; foreach($aggServs as $r) $mapS[$r['d']] = (int)$r['c'];
-$mapA=[]; foreach($aggAnns  as $r) $mapA[$r['d']] = (int)$r['c'];
-$mapN=[]; foreach($aggNotfs as $r) $mapN[$r['d']] = (int)$r['c'];
-
-$dataCodes = array_map(fn($d)=> (int)($mapC[$d] ?? 0), $labels);
-$dataServs = array_map(fn($d)=> (int)($mapS[$d] ?? 0), $labels);
-$dataAnns  = array_map(fn($d)=> (int)($mapA[$d] ?? 0), $labels);
-$dataNotfs = array_map(fn($d)=> (int)($mapN[$d] ?? 0), $labels);
-
-/* --------------- top services by codes --------------- */
-$topServices = DB::all('
-  SELECT COALESCE(s.name,"(unset)") as s, COUNT(*) c
-  FROM nio_active_codes c
-  LEFT JOIN nio_services s ON s.id = c.service_id
-  GROUP BY s.name
-  ORDER BY c DESC
-  LIMIT 5
-');
-$svcLabels = array_map(fn($t)=>(string)$t['s'], $topServices);
-$svcCounts = array_map(fn($t)=>(int)$t['c'], $topServices);
-
-/* --------------- recent items --------------- */
-$recentCodes = DB::all('
-  SELECT c.id, c.code, c.username, c.created_at, s.name AS service_name
-  FROM nio_active_codes c
-  LEFT JOIN nio_services s ON s.id = c.service_id
-  ORDER BY c.id DESC
-  LIMIT 8
-');
-$recentAnn   = DB::all('SELECT id,title,created_at FROM nio_announcements ORDER BY id DESC LIMIT 6');
-$recentNotif = DB::all('SELECT id,title,created_at FROM nio_notifications ORDER BY id DESC LIMIT 6');
-?>
-<style>
-/* layout & cards */
-.grid{display:grid;gap:16px}
-@media(min-width:900px){.grid-2{grid-template-columns:1fr 1fr}.grid-3{grid-template-columns:repeat(3,1fr)}}
-.panel{border:1px solid #374151;border-radius:.75rem;overflow:hidden}
-.hdr{padding:.6rem .8rem;border-bottom:1px solid #374151;font-weight:600}
-.bd{padding:1rem}
-.tile{border:1px solid #374151;border-radius:.65rem;padding:.85rem}
-.tile .label{opacity:.75}
-.badge{display:inline-block;padding:.05rem .35rem;border:1px solid #2a2f3a;border-radius:.35rem;font-size:.75rem}
-
-/* tables */
-.table{width:100%;border-collapse:separate;border-spacing:0}
-.table th,.table td{border-bottom:1px solid #2a2f3a;padding:.55rem .6rem;text-align:left;vertical-align:top}
-.table thead th{background:var(--surface,#111827)}
-.small{opacity:.75}
-.msg{max-width:520px;white-space:normal}
-.img-thumb{max-height:44px;max-width:90px;border-radius:4px}
-
-.chartWrap{padding:1rem}
-</style>
-
-<h1 class="text-2xl font-bold mb-4">Painel</h1>
-
-<!-- Top metrics -->
-<div class="grid grid-4 grid-2">
-  <div class="tile">
-    <div class="label">Serviços</div>
-    <div class="text-2xl font-bold mt-1"><?= (int)$stats['services'] ?></div>
-  </div>
-  <div class="tile">
-    <div class="label">Códigos de Cliente</div>
-    <div class="text-2xl font-bold mt-1"><?= (int)$stats['codes'] ?></div>
-  </div>
-  <div class="tile">
-    <div class="label">Avisos</div>
-    <div class="text-2xl font-bold mt-1"><?= (int)$stats['announcements'] ?></div>
-  </div>
-  <div class="tile">
-    <div class="label">Notificações</div>
-    <div class="text-2xl font-bold mt-1"><?= (int)$stats['notifications'] ?></div>
-  </div>
-</div>
-
-<!-- Charts -->
-<div class="grid grid-2" style="margin-top:16px">
-  <div class="panel">
-    <div class="hdr">Novos itens (últimos <?= (int)$days ?> dias)</div>
-    <div class="bd chartWrap">
-      <canvas id="chartAll" width="640" height="320"></canvas>
-    </div>
-  </div>
-  <div class="panel">
-    <div class="hdr">Serviços em Destaque (por códigos)</div>
-    <div class="bd chartWrap">
-      <?php if ($topServices): ?>
-        <canvas id="chartServices" width="640" height="320"></canvas>
-      <?php else: ?>
-        <div class="small">Ainda não há serviços.</div>
-      <?php endif; ?>
-    </div>
-  </div>
-</div>
-
-<!-- Recent lists -->
-<div class="grid grid-3" style="margin-top:16px">
-  <div class="panel">
-    <div class="hdr">Códigos Recentes</div>
-    <div class="bd">
-      <table class="table">
-        <thead><tr><th style="width:70px">ID</th><th>Código</th><th>Serviço</th><th>Usuário</th><th>Criado em</th></tr></thead>
-        <tbody>
-        <?php if ($recentCodes): foreach ($recentCodes as $r): ?>
-          <tr>
-            <td><?= (int)$r['id'] ?></td>
-            <td><code><?= h((string)$r['code']) ?></code></td>
-          <td><?= h($r['service_name'] ?? '(não definido)') ?></td>
-            <td><?= h($r['username'] ?? '—') ?></td>
-          <td class="small"><?= h(fmt_time($r['created_at'] ?? '')) ?></td>
-          </tr>
-        <?php endforeach; else: ?>
-          <tr><td colspan="5" class="small">Ainda não há códigos.</td></tr>
-        <?php endif; ?>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="hdr">Avisos Recentes</div>
-    <div class="bd">
-      <table class="table">
-        <thead><tr><th style="width:70px">ID</th><th>Título</th><th>Criado em</th></tr></thead>
-        <tbody>
-        <?php if ($recentAnn): foreach ($recentAnn as $r): ?>
-          <tr>
-            <td><?= (int)$r['id'] ?></td>
-            <td><?= h((string)$r['title']) ?></td>
-            <td class="small"><?= h(fmt_time($r['created_at'] ?? '')) ?></td>
-          </tr>
-        <?php endforeach; else: ?>
-          <tr><td colspan="3" class="small">Ainda não há avisos.</td></tr>
-        <?php endif; ?>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="hdr">Notificações Recentes</div>
-    <div class="bd">
-      <table class="table">
-        <thead><tr><th style="width:70px">ID</th><th>Título</th><th>Criado em</th></tr></thead>
-        <tbody>
-        <?php if ($recentNotif): foreach ($recentNotif as $r): ?>
-          <tr>
-            <td><?= (int)$r['id'] ?></td>
-            <td><?= h((string)$r['title']) ?></td>
-            <td class="small"><?= h(fmt_time($r['created_at'] ?? '')) ?></td>
-          </tr>
-        <?php endforeach; else: ?>
-          <tr><td colspan="3" class="small">Ainda não há notificações.</td></tr>
-        <?php endif; ?>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-<!-- Chart.js (CDN) -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
-
-<script defer>
-(function boot(){
-  if(!window.Chart) return setTimeout(boot, 20);
-
-  var labels     = <?= json_encode($labels) ?>;
-  var dataCodes  = <?= json_encode($dataCodes) ?>;
-  var dataServs  = <?= json_encode($dataServs) ?>;
-  var dataAnns   = <?= json_encode($dataAnns) ?>;
-  var dataNotfs  = <?= json_encode($dataNotfs) ?>;
-
-  var services   = <?= json_encode($svcLabels) ?>;
-  var svcCounts  = <?= json_encode($svcCounts) ?>;
-
-  // Multi-series bar
-  new Chart(document.getElementById('chartAll').getContext('2d'), {
-    type: 'bar',
-    data: {
-      labels: labels,
-      datasets: [
-        { label: 'Códigos', data: dataCodes, backgroundColor: 'rgba(99, 102, 241, 0.7)' },
-        { label: 'Serviços', data: dataServs, backgroundColor: 'rgba(34, 197, 94, 0.7)'  },
-        { label: 'Avisos',  data: dataAnns,  backgroundColor: 'rgba(234, 179, 8, 0.7)'  },
-        { label: 'Notificações', data: dataNotfs, backgroundColor: 'rgba(239, 68, 68, 0.7)'  }
-      ]
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { position: 'top' } },
-      scales: {
-        y: { beginAtZero: true, ticks: { precision: 0 } },
-        x: { stacked: false }
-      }
+function xor_encrypt_decrypt($data, $key) {
+    $keyLength = strlen($key);
+    $result = "";
+    for ($i = 0, $n = strlen($data); $i < $n; $i++) {
+        $result .= $data[$i] ^ $key[$i % $keyLength];
     }
-  });
+    return $result;
+}
+function encrypt_response($json_data) {
+    $encryption_key = "(this as java.lang.String).getBytes(...)";
+    $encrypted = xor_encrypt_decrypt($json_data, $encryption_key);
+    return base64_encode($encrypted);
+}
 
-  // Services pie or bar depending on count
-  var ctxS = document.getElementById('chartServices');
-  if (ctxS && services.length) {
-    new Chart(ctxS.getContext('2d'), {
-      type: services.length <= 5 ? 'bar' : 'bar',
-      data: {
-        labels: services,
-        datasets: [{ data: svcCounts, backgroundColor: [
-          'rgba(99,102,241,0.8)','rgba(34,197,94,0.8)',
-          'rgba(234,179,8,0.8)','rgba(239,68,68,0.8)','rgba(59,130,246,0.8)'
-        ] }]
-      },
-      options: {
-        responsive: true,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
-      }
-    });
-  }
-})();
-</script>
+/* ---------------- Small DB helpers (DB:: wrapper) ---------------- */
 
-<?php require_once __DIR__ . '/includes/footer.php'; ?>
+function db_setting(string $key, $default = null) {
+    $row = DB::one('SELECT v FROM nio_settings WHERE k=? LIMIT 1', [$key]);
+    if (!$row || $row['v'] === null) return $default;
+    return (string)$row['v'];
+}
+function db_table_exists(string $table): bool {
+    $row = DB::one("SELECT name FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", [$table]);
+    return (bool)$row;
+}
+function db_column_exists(string $table, string $col): bool {
+    $rows = DB::all('PRAGMA table_info(' . $table . ')');
+    foreach ($rows as $r) {
+        if (isset($r['name']) && strcasecmp((string)$r['name'], $col) === 0) return true;
+    }
+    return false;
+}
+
+/* ---------------- Main entry ---------------- */
+
+header("Content-Type: application/json; charset=utf-8");
+http_response_code(200);
+
+$endpoint    = (string)(parse_url($_SERVER["REQUEST_URI"] ?? '', PHP_URL_PATH) ?? '');
+$device_code = trim((string)($_GET["device_code"] ?? ""));
+$device_key  = trim((string)($_GET["device_key"]  ?? ""));
+$unique_id   = trim((string)($_GET["unique_id"]   ?? ""));
+
+try {
+    // Services (active only)
+    $services = DB::all(
+        "SELECT id, name, url FROM nio_services WHERE status=? ORDER BY name COLLATE NOCASE ASC",
+        ['active']
+    );
+
+    // If an activation code is given, resolve one service + creds
+    $playlistsList = [];
+    if ($device_code !== '') {
+        $active = DB::one("SELECT * FROM nio_active_codes WHERE code=? LIMIT 1", [$device_code]);
+        if ($active && !empty($active['service_id'])) {
+            $svc = DB::one("SELECT id, name, url FROM nio_services WHERE id=? LIMIT 1", [(int)$active['service_id']]);
+            if ($svc) {
+                $playlistsList[] = [
+                    "id"            => 1,
+                    "playlist_name" => (string)$svc["name"],
+                    "DNS"           => (string)$svc["url"],
+                    "username"      => (string)($active["username"] ?? ''),
+                    "password"      => (string)($active["password"] ?? ''),
+                ];
+            }
+        }
+    }
+
+    // DNS list for app
+    $dnsList = [];
+    foreach ($services as $svc) {
+        $dnsList[] = [
+            'id'      => (int)$svc['id'],
+            'title'   => (string)$svc['name'],
+            'url'     => (string)$svc['url'],
+            'user_id' => $unique_id,
+        ];
+    }
+
+    // Settings (k/v)
+    $logo_url       = db_setting('logo_url', '');
+    $background_url = db_setting('background_url', '');
+    $app_mode       = db_setting('app_mode', 'Xtream');
+    $privacy_policy = db_setting('privacy_policy', 'https://pastebin.com/raw/JiimGEjk');
+    $legal_msg      = db_setting('legal_msg', '');
+
+} catch (Throwable $e) {
+    echo json_encode(["status" => "error", "message" => "Database error: " . $e->getMessage()], JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/* ---------------- Endpoints ---------------- */
+
+if (strpos($endpoint, "/api/device-by-key") !== false) {
+    echo json_encode([
+        "status"        => "success",
+        "message"       => "Device Found Successfully.",
+        "data"          => [
+            "device_code"   => $device_code,
+            "licence"       => "Active",
+            "is_expired"    => 0,
+            "device_status" => 1,
+            "playlist_name" => $playlistsList
+        ]
+    ], JSON_UNESCAPED_SLASHES);
+    return;
+}
+
+if (strpos($endpoint, "/player/mobile/v1/an.json") !== false) {
+    echo json_encode([
+        "legal_config" => ["msg" => $legal_msg],
+        "language"     => ["defult_language" => "EN", "firstime_select_language" => "true"],
+        "version"      => [
+            "version_check"        => "false",
+            "version_code"         => "1",
+            "version_name"         => "1.0",
+            "version_download_url" => "",
+            "version_download_url_apk" => "",
+            "version_force_update" => "false",
+            "version_update_msg"   => "Please Update App",
+            "version_changelog"    => []
+        ],
+        "player" => [
+            "live_tv"  => "Exo Player",
+            "vod"      => "Exo Player",
+            "series"   => "Exo Player",
+            "catch_up" => "Exo Player"
+        ],
+        "content" => [
+            "mackey_step" => "1) Register or Login at https://my.nioplayer.com\n\n2) Navigate To Playlist > Add New Playlist and then My Devices > Add New Device. \n\n3) Enter Device Id and Device Key and Choose your playlist and 'Submit'.\n",
+            "activation_step" => "1) Register or Login at https://my.nioplayer.com\n\n2) Click To 'Add New Device' And 'Add New Playlist'\n\n3) Assign Devices To Playlist and 'Submit'\n\n4) Enter the 'Device Code' in the box below",
+            "ads_txt"   => "",
+            "legal_msg" => $legal_msg
+        ],
+        "api_key"   => ["analyt_key" => "", "analyt_server" => "", "appcenter" => ""],
+        "agreement" => ["privacy_policy" => $privacy_policy],
+        "ads"       => [
+            "status" => false,
+            "priority" => "fb",
+            "ab" => ["ads_app_id"=>"","ads_banner"=>"","ads_intrestial"=>"","ads_rewarded"=>"","ads_open_app"=>"","ads_native"=>""],
+            "fb" => ["ads_app_id"=>"","ads_banner"=>"","ads_intrestial"=>"","ads_rewarded"=>"","ads_rectangle"=>"","ads_native"=>""],
+            "vast" => [
+                "live"  => ["status"=>false,"main"=>"","backup"=>""],
+                "movie" => ["status"=>false,"main"=>"","backup"=>""],
+                "show"  => ["status"=>false,"main"=>"","backup"=>""]
+            ]
+        ]
+    ], JSON_UNESCAPED_SLASHES);
+    return;
+}
+
+if (strpos($endpoint, "/api/branding") !== false) {
+    $branding_data = [
+        "status"  => "success",
+        "message" => "App Setting Get Successfully.",
+        "data"    => [
+            "app_mode"             => $app_mode,
+            "dns"                  => $dnsList,
+            "wide_logo"            => $logo_url,
+            "background_image"     => $background_url,
+            "privacy_policy"       => $privacy_policy,
+            "version_check"        => false,
+            "version_force_update" => false,
+            "version_code"         => "1",
+            "version_name"         => "1.0",
+            "version_download_url" => "https://example.com/download",
+            "version_download_url_apk" => "https://example.com/download.apk",
+            "version_update_msg"   => "New version available.",
+            "version_changelog"    => [
+                ["title"=>"Bug Fixes","description"=>"Fixed various bugs.","version_name"=>"1.0","version_code"=>"1"]
+            ],
+        ],
+    ];
+    $json_response      = json_encode($branding_data, JSON_UNESCAPED_SLASHES);
+    $encrypted_response = encrypt_response($json_response);
+    echo $encrypted_response;
+    return;
+}
+
+if (strpos($endpoint, "/api/announcement") !== false) {
+    $data = [];
+
+    if (db_table_exists('nio_announcements')) {
+        $hasImage = db_column_exists('nio_announcements', 'image');
+        $select = "SELECT id, title, message" . ($hasImage ? ", image" : ", NULL AS image")
+                . " FROM nio_announcements WHERE status='active' ORDER BY id DESC";
+        $rows = DB::all($select);
+        foreach ($rows as $a) {
+            $data[] = [
+                "id"                 => (int)$a["id"],
+                "user_id"            => "1",
+                "title"              => (string)$a["title"],
+                "description"        => (string)$a["message"],
+                "announcement_image" => (string)($a["image"] ?? ''),
+                "device_type"        => 1,
+                "device_key"         => null,
+                "status"             => 1
+            ];
+        }
+    } elseif (db_table_exists('nio_announcement')) {
+        // Legacy fallback
+        $hasShort = db_column_exists('nio_announcement', 'short_description');
+        $hasImage = db_column_exists('nio_announcement', 'image');
+        $select = "SELECT id, title"
+                . ($hasShort ? ", short_description AS message" : ", '' AS message")
+                . ($hasImage ? ", image" : ", NULL AS image")
+                . " FROM nio_announcement ORDER BY id DESC";
+        $rows = DB::all($select);
+        foreach ($rows as $a) {
+            $data[] = [
+                "id"                 => (int)$a["id"],
+                "user_id"            => "1",
+                "title"              => (string)$a["title"],
+                "description"        => (string)($a["message"] ?? ''),
+                "announcement_image" => (string)($a["image"] ?? ''),
+                "device_type"        => 1,
+                "device_key"         => null,
+                "status"             => 1
+            ];
+        }
+    }
+
+    echo json_encode(["status" => "success", "message" => "Announcement Get Successfully.", "data" => $data], JSON_UNESCAPED_SLASHES);
+    return;
+}
+
+if (strpos($endpoint, "/api/notifications") !== false) {
+    $rows = DB::all("SELECT id, title, message FROM nio_notifications WHERE status='active' ORDER BY id DESC");
+    $data = [];
+    foreach ($rows as $n) {
+        $data[] = [
+            "id"          => (int)$n["id"],
+            "user_id"     => null,
+            "title"       => (string)$n["title"],
+            "description" => (string)$n["message"],
+            "device_type" => 2,
+            "device_key"  => $device_key,
+            "status"      => 1
+        ];
+    }
+    echo json_encode(["status" => "success", "message" => "Notifications Get Successfully.", "data" => $data], JSON_UNESCAPED_SLASHES);
+    return;
+}
+
+// Default
+echo json_encode(["http_code" => "403", "status" => "failure", "licence" => "Inactive"], JSON_UNESCAPED_SLASHES);
