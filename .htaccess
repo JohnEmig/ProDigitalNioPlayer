@@ -1,2 +1,5 @@
-Options -Indexes
-AddDefaultCharset utf-8
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^api/(device-by-key|branding|announcement|notifications)$ index.php [QSA,L]
+RewriteRule ^player/mobile/v1/an.json$ index.php [QSA,L]
